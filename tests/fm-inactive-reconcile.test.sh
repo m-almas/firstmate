@@ -501,6 +501,49 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   pass "pr= requires the recorded PR or a ready-signal terminal line, whatever its stamp, and never a scout"
 }
 
+# The not-proven report a crew adds to its done: line is still the ready-signal
+# shape, so it keeps its pr=; a line that merely continues after the url is not.
+test_pr_field_survives_not_proven_report_on_done_line() {
+  local id line expected
+  local -a accepted=(
+    'nothing|done: PR https://example.test/owner/repo/pull/81 - not proven: nothing|pull/81'
+    'green|done: PR https://example.test/owner/repo/pull/82 checks green - not proven: nothing|pull/82'
+    'stamped|done [at=1788576000]: PR https://example.test/owner/repo/pull/83 - not proven: login on a real phone; push delivery|pull/83'
+    'cyrillic|done: PR https://example.test/owner/repo/pull/84 - not proven: вход на телефоне|pull/84'
+    'links|done: PR https://example.test/owner/repo/pull/85 - not proven: same as https://example.test/owner/repo/pull/9|pull/85'
+  )
+  local -a refused=(
+    'empty|done: PR https://example.test/owner/repo/pull/86 - not proven: '
+    'prose|done: PR https://example.test/owner/repo/pull/87 - looks fine, not proven: nothing'
+    'late|done: PR https://example.test/owner/repo/pull/88 checks green, risk low - not proven: nothing'
+  )
+  make_world pr-not-proven; bind_secondmate local
+  for line in "${accepted[@]}" "${refused[@]}"; do
+    id=${line%%|*}; line=${line#*|}; line=${line%|pull/*}
+    write_child "$MATE" "$id" "$line"
+    awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
+    mv "$MATE/state/$id.meta.tmp" "$MATE/state/$id.meta"
+  done
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  for line in "${accepted[@]}"; do
+    id=${line%%|*}; expected=${line##*|}
+    grep -Fq "child $id done" "$MAIN/state/mate.status" \
+      || fail "$id was not reported: $(cat "$MAIN/state/mate.status")"
+    grep -F "child $id done" "$MAIN/state/mate.status" \
+      | grep -Fq " pr=https://example.test/owner/repo/$expected mode=" \
+      || fail "$id lost its pr=: $(cat "$MAIN/state/mate.status")"
+  done
+  for line in "${refused[@]}"; do
+    id=${line%%|*}
+    grep -Fq "child $id done" "$MAIN/state/mate.status" \
+      || fail "$id was not reported: $(cat "$MAIN/state/mate.status")"
+    if grep -F "child $id done" "$MAIN/state/mate.status" | grep -Fq ' pr='; then
+      fail "$id claimed a PR from a line outside the ready-signal shape: $(cat "$MAIN/state/mate.status")"
+    fi
+  done
+  pass "a done: line ending in the not-proven report keeps its pr=, and only that longer shape does"
+}
+
 # If a terminal ledger line lands while the authoritative state read is in
 # flight, the ledger path remains the single owner on the next poll.
 test_terminal_line_during_state_read_yields_to_ledger_delivery() {
@@ -1081,6 +1124,7 @@ test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
+test_pr_field_survives_not_proven_report_on_done_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery
 test_terminal_line_after_inactive_delivery_is_not_reported_twice
 test_progress_after_inactive_delivery_starts_a_new_event
