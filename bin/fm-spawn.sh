@@ -1550,6 +1550,8 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 T3CODE_ABORT_CLEANUP=0
 T3CODE_LEASED=0
+SPAWN_WT_LEASED=0
+SPAWN_SHELL_ACK_DIR=
 T3CODE_HOME_ENV=0
 T3CODE_CLAUDE_CHANNEL_WRITTEN=0
 T3CODE_CREATE_UNCERTAIN=0
@@ -1840,6 +1842,21 @@ spawn_abort_cleanup() {
   # atomic replacement rather than racing it. A polytoken spawn instead retakes
   # that lock once for a later failure whose record was rolled back. The
   # release itself never removes another task's claim.
+  if [ "$SPAWN_WT_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
+    SPAWN_WT_LEASED=0
+    if [ "$status" -ne 0 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ] &&
+      [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if [ -n "${STATE_REAL:-}" ] && ! clear_relaunch_harness_wiring "$HARNESS" "$WT" "$STATE_REAL" "$ID" "$KIND"; then
+        echo "warning: could not remove the $HARNESS wiring this spawn wrote into $WT for $ID, so it stays leased; remove it, then run 'treehouse return --force $WT' from $PROJ_ABS" >&2
+      elif ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$ID" "$WT") >/dev/null 2>&1; then
+        echo "warning: could not return the worktree $WT leased to $ID; run 'treehouse return --force $WT' from $PROJ_ABS" >&2
+      fi
+    fi
+  fi
+  if [ -n "$SPAWN_SHELL_ACK_DIR" ]; then
+    rm -rf -- "$SPAWN_SHELL_ACK_DIR" 2>/dev/null || true
+    SPAWN_SHELL_ACK_DIR=
+  fi
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
@@ -4701,6 +4718,17 @@ else
     # workspace must never be adopted). A --secondmate launch is the exception -
     # it stands up a DIFFERENT home's own workspace by design - so it asks for
     # the per-home container instead of inheriting this launcher's.
+    HERDR_TASK_CWD=$PROJ_ABS
+    if [ "$KIND" != secondmate ]; then
+      WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+        echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
+        exit 1
+      }
+      [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
+      validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
+      SPAWN_WT_LEASED=1
+      HERDR_TASK_CWD=$WT
+    fi
     HERDR_LABEL_HOME=$FM_HOME
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
@@ -4740,7 +4768,7 @@ else
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$HERDR_TASK_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -4797,7 +4825,7 @@ else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$HERDR_TASK_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -4855,7 +4883,7 @@ else
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$HERDR_TASK_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -5118,10 +5146,36 @@ spawn_enter_recorded_worktree() {
   # T3 starts the agent in the leased worktree its thread launch bound;
   # there is no shell endpoint to receive a cd command.
   [ "$BACKEND" = t3code ] && return 0
-  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {
+  local line ack=
+  line="cd -- $(shell_quote "$WT")"
+  if [ "$SPAWN_WT_LEASED" = 1 ]; then
+    SPAWN_SHELL_ACK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-shell-ack.XXXXXX") || {
+      echo "error: could not create a directory for task $ID's shell acknowledgement" >&2
+      exit 1
+    }
+    ack="$SPAWN_SHELL_ACK_DIR/ran"
+    line="$line && touch -- $(shell_quote "$ack")"
+  fi
+  spawn_send_text_line "$WT_TARGET" "$line" || {
     echo "error: task $ID's endpoint could not be moved into its recorded worktree '$WT'; refusing to launch outside the copy holding its work" >&2
     exit 1
   }
+  [ -z "$ack" ] || spawn_await_shell_ack "$ack"
+}
+
+spawn_await_shell_ack() { # <ack-file>
+  local ack=$1 secs=${FM_SPAWN_SHELL_READY_SECS:-60} waited=0
+  case "$secs" in ''|*[!0-9]*) secs=60 ;; esac
+  while [ ! -e "$ack" ]; do
+    if [ "$waited" -ge $((secs * 2)) ]; then
+      echo "error: the pane shell of task $ID never ran the command firstmate typed into it within ${secs}s, so its interactive startup has not finished and nothing was launched; the pane opened in its leased worktree '$WT', which this spawn returns to the pool; look at the startup files of the shell the $BACKEND session starts; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
+    sleep 0.5
+    waited=$((waited + 1))
+  done
+  rm -rf -- "$SPAWN_SHELL_ACK_DIR" 2>/dev/null || true
+  SPAWN_SHELL_ACK_DIR=
 }
 
 # Verify the endpoint's cwd after the explicit handoff but before any harness
@@ -5612,7 +5666,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
-  if [ "$BACKEND" != t3code ]; then
+  if [ "$BACKEND" != t3code ] && [ "$SPAWN_WT_LEASED" != 1 ]; then
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -5700,7 +5754,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
+    if [ "$?" -eq 2 ] && [ "$SPAWN_WT_LEASED" = 1 ]; then
+      SPAWN_WT_LEASED=0
+      echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
+    fi
+    exit 1
+  }
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
