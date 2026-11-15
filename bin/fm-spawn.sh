@@ -4266,6 +4266,19 @@ spawn_worktree_isolated() { # <path>
 # spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
 # fresh polytoken spawn closes its endpoint on abort, so only it points away
 # from the window; every other harness keeps the plain inspect pointer.
+spawn_lease_herdr_worktree() {
+  [ "$KIND" != secondmate ] || return 0
+  [ "$SPAWN_WT_LEASED" != 1 ] || return 0
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+    echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
+    exit 1
+  }
+  [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
+  validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
+  SPAWN_WT_LEASED=1
+  HERDR_TASK_CWD=$WT
+}
+
 spawn_endpoint_closes_on_abort() {
   [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
 }
@@ -4719,16 +4732,6 @@ else
     # it stands up a DIFFERENT home's own workspace by design - so it asks for
     # the per-home container instead of inheriting this launcher's.
     HERDR_TASK_CWD=$PROJ_ABS
-    if [ "$KIND" != secondmate ]; then
-      WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
-        echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
-        exit 1
-      }
-      [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
-      validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
-      SPAWN_WT_LEASED=1
-      HERDR_TASK_CWD=$WT
-    fi
     HERDR_LABEL_HOME=$FM_HOME
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
@@ -4764,6 +4767,7 @@ else
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          spawn_lease_herdr_worktree
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
@@ -4792,6 +4796,7 @@ else
           spawn_herdr_presentation_order_lock_release
         fi
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        spawn_lease_herdr_worktree
         # Session lock path resolution and exact parent binding both need a
         # live named-session socket before journal publication.
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
@@ -4872,6 +4877,7 @@ else
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      spawn_lease_herdr_worktree
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
