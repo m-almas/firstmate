@@ -4263,9 +4263,6 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
-# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
-# fresh polytoken spawn closes its endpoint on abort, so only it points away
-# from the window; every other harness keeps the plain inspect pointer.
 spawn_lease_herdr_worktree() {
   [ "$KIND" != secondmate ] || return 0
   [ "$SPAWN_WT_LEASED" != 1 ] || return 0
@@ -4279,6 +4276,9 @@ spawn_lease_herdr_worktree() {
   HERDR_TASK_CWD=$WT
 }
 
+# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
+# fresh polytoken spawn closes its endpoint on abort, so only it points away
+# from the window; every other harness keeps the plain inspect pointer.
 spawn_endpoint_closes_on_abort() {
   [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
 }
@@ -5169,7 +5169,7 @@ spawn_enter_recorded_worktree() {
   [ -z "$ack" ] || spawn_await_shell_ack "$ack"
 }
 
-spawn_await_shell_ack() { # <ack-file>
+spawn_await_shell_ack() {
   local ack=$1 secs=${FM_SPAWN_SHELL_READY_SECS:-60} waited=0
   case "$secs" in ''|*[!0-9]*) secs=60 ;; esac
   while [ ! -e "$ack" ]; do
