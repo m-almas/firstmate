@@ -210,9 +210,6 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
 # one pool slot before reaching the Herdr session lock exercised below.
@@ -872,25 +869,35 @@ if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
 if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
-# The forced foreground_cwd is a plain non-git directory, which the discovery
-# poll now screens out on every read rather than adopting, so the armed failure
-# arrives as the poll's own deadline refusal naming that path.
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+grep -F "not its recorded worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture A did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-a.err")"
+grep -F "not its recorded worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture B did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-b.err")"
+for ABORT_ID in abort-a abort-b; do
+  awk -F '\t' -v id="$ABORT_ID" '$1 == "return" && $2 == "--force" && $3 == "--if-lease-holder" && $4 == id { found = 1 } END { exit !found }' "$TREEHOUSE_CALL_LOG" \
+    || fail "post-create abort fixture $ABORT_ID did not return its leased worktree"
+done
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
-ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
-  $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
-  $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
-')
-case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
-  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
-esac
+abort_span() {
+  sed -n "$((ABORT_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' -v ws="$1" -v label="$2" '
+    {
+      for (i = 1; i <= NF; i += 1) {
+        if ($i == ws || index($i, ws ":") == 1 || index($i, label) == 1) {
+          if (!first) first = NR
+          last = NR
+        }
+      }
+    }
+    END { print first + 0, last + 0 }
+  '
+}
+read -r ABORT_A_FIRST ABORT_A_LAST < <(abort_span "$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/workspace")" '└ abort-a · p:')
+read -r ABORT_B_FIRST ABORT_B_LAST < <(abort_span "$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/workspace")" '└ abort-b · p:')
+[ "$ABORT_A_FIRST" -gt 0 ] && [ "$ABORT_B_FIRST" -gt 0 ] \
+  || fail "post-create abort fixtures did not both create a projection"
+[ "$ABORT_A_LAST" -lt "$ABORT_B_FIRST" ] || [ "$ABORT_B_LAST" -lt "$ABORT_A_FIRST" ] \
+  || fail "concurrent post-create abort cleanup interleaved outside the presentation lock: abort-a calls $ABORT_A_FIRST-$ABORT_A_LAST, abort-b calls $ABORT_B_FIRST-$ABORT_B_LAST"
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
 ')

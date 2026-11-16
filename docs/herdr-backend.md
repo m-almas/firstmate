@@ -18,6 +18,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Install Herdr and select it | [Setup](#setup) |
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
+| How a crew pane gets its worktree | [Crew worktrees](#crew-worktrees) |
 | The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
 | Grouping tasks by project with status tags and a sorted agents list | [Project groups](#project-groups) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
@@ -164,6 +165,21 @@ It mints a replacement tab through this section's ordinary placement rules while
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
+
+### Crew worktrees
+
+A ship or scout spawn on Herdr leases its Treehouse worktree before it opens a pane, with `treehouse get --lease --lease-holder <task-id>` run from the project.
+The task pane is then created with its cwd at that worktree, so the pane shell's interactive startup cannot keep the spawn out of it.
+Nothing types `treehouse get` into the pane.
+
+The pane shell still runs what Firstmate types next: the `cd` into the recorded worktree and then the launch.
+The `cd` carries an acknowledgement, and the spawn waits `FM_SPAWN_SHELL_READY_SECS` seconds (default 60) for it.
+When the shell never runs it, the spawn refuses with an error that says the pane shell never ran the command, and launches nothing.
+
+A spawn that fails before its launch is sent, and before its task record exists, removes any harness wiring it wrote and returns the lease with `treehouse return --force --if-lease-holder <task-id>`.
+A worktree that is not clean when the spawn refreshes its base stays leased for inspection, and the error names the `treehouse return --force` command that releases it.
+Teardown returns the lease like any other pool slot.
+A secondmate home is not a pool slot and takes no lease here.
 
 ## Presentation spaces
 
